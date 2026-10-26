@@ -31,7 +31,7 @@ index 468f70f..60bc5c0 100644
      gui/plugin_info_dialog.h \
      gui/plugin_list_item_widget.h \
 diff --git a/digital_clock/gui/clock_widget.cpp b/digital_clock/gui/clock_widget.cpp
-index e756e5d..25b0d5f 100644
+index e756e5d..26b8f37 100644
 --- a/digital_clock/gui/clock_widget.cpp
 +++ b/digital_clock/gui/clock_widget.cpp
 @@ -25,12 +25,14 @@
@@ -75,14 +75,16 @@ index e756e5d..25b0d5f 100644
      case OPT_SEPARATOR_FLASH:
        display_->SetSeparatorFlash(value.toBool());
        break;
-@@ -198,6 +210,33 @@ void ClockWidget::TimeoutHandler()
+@@ -198,6 +210,35 @@ void ClockWidget::TimeoutHandler()
    display_->TimeoutHandler();
  }
  
 +void ClockWidget::OnDrawingFinished(const QImage& image)
 +{
-+  const bool animate = flip_enabled_ && text_changed_ && !preview() &&
-+                       !last_image_.isNull();
++  // flip also runs while the settings dialog is open (preview mode); a size
++  // change (skin/zoom edited in the dialog) makes start() refuse, so only real
++  // time/countdown changes are animated
++  const bool animate = flip_enabled_ && text_changed_ && !last_image_.isNull();
 +  text_changed_ = false;
 +
 +  if (animate) {
