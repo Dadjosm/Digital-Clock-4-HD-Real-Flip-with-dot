@@ -22,11 +22,19 @@ jobs:
           host: 'windows'
           target: 'desktop'
           arch: 'win32_mingw73'
-          tools: 'tools_mingw,7.3.0-1-1,qt.tools.win32_mingw730'
-          cache: true
+          cache: false
 
-      - name: Put MinGW on PATH
-        run: echo "$IQTA_TOOLS/mingw730_32/bin" >> "$GITHUB_PATH"
+      - name: Install the MinGW 7.3 32-bit compiler that matches Qt
+        run: |
+          python -m pip install aqtinstall==3.1.*
+          python -m aqt install-tool windows desktop tools_mingw qt.tools.win32_mingw730 --outputdir "$GITHUB_WORKSPACE/Qt"
+          echo "$GITHUB_WORKSPACE/Qt/Tools/mingw730_32/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          g++ --version
+          qmake -v
+          mingw32-make --version | head -n1
 
       - name: Get source (tag stable_4.7.8) and dependencies
         run: |
