@@ -4,7 +4,7 @@ A customised build of [Digital Clock 4](https://github.com/Kolcha/DigitalClock4)
 with an improved **Flipclock HD** skin and a real **card-flip animation**.
 
 Everything here is built from the official source at tag `stable_4.7.8`, plus one patch
-(`flip-animation.patch`) and a modified skin folder. Only `digital_clock.exe` is replaced;
+(`flip-animation.patch`) and a modified skin folder. Only `digital_clock.exe` and `plugins\countdown_timer.dll` are replaced;
 all other DLLs and plugins in your `Digital Clock 4` folder stay as they are.
 
 ---
@@ -36,6 +36,12 @@ Reference values measured from the skin images (RGB 0–255):
 | **Flip only for flip skins** | `gui/clock_widget.cpp`, `core/clock_application.cpp` | Animation and the colorize behaviour below are used only when the selected skin's name contains "flip" (case-insensitive). All other skins behave exactly as before. |
 | **Flip works while settings is open** | `gui/clock_widget.cpp` | The settings dialog puts the clock in "preview mode"; the flip no longer pauses there, so countdown-timer ticks flip while you configure. If a setting change alters the clock size (skin/zoom), the animation is skipped and the new look just appears. |
 | **Colorize tints only the card** | `gui/colorize_effect.{h,cpp}`, `gui/clock_widget.{h,cpp}` | With *Colorize* enabled on a flip skin, only the dark card body takes the chosen colour. The white top digit, the grey lower digit and the separator dots are untouched; the lower half of the card stays proportionally darker and the seam stays black. The existing colour picker and strength slider are used. The flip is drawn from already-coloured images, so colour and flip work together. |
+| **Flips on the exact second** | `gui/clock_widget.{h,cpp}` | Flip skins are refreshed exactly on every half second (digits change on the full second, the separator blinks on the half) instead of whenever the periodic refresh timer fires. Removes up to 0.5 s of random delay and the uneven gaps between flips. |
+| **Blink follows the wall clock** | `gui/clock_display.cpp` | The separator is shown during the first half of each second, based on the current time rather than the previous refresh. |
+| **Separator blink no longer cuts a flip** | `gui/flip_animator.{h,cpp}`, `gui/clock_widget.cpp` | If only the separator changes while a flip is running, the flip continues (`retarget`) instead of snapping to the end. |
+| **Smoother start of each flip** | `gui/flip_animator.{h,cpp}`, `gui/colorize_effect.cpp`, `gui/clock_widget.cpp` | Static parts and flap images are prepared once per flip, the previous coloured image is reused instead of recomputed, and card-colorize uses lookup tables. Start-up cost dropped to about 1.5 ms in the test program. |
+| **High priority (Windows)** | `main.cpp` | Process priority set to *High* and the GUI thread to *Above normal*, so the animation isn't starved by other programs. |
+| **Countdown timer flips too** | `plugins/countdown_timer/` (`countdown_timer_plugin.{h,cpp}`, `countdown_timer.pro`, new `gui/flip_animator.*`, `gui/colorize_effect.*`) | The countdown timer plugin draws its own display, so it gets its own copy of the flip code. With a flip skin its digits flip every second. The card stays black (the clock's *Colorize* setting does **not** affect it) and turns **red** when the countdown reaches zero, then back to black when it restarts. Other skins are unchanged. This needs the rebuilt `countdown_timer.dll`. |
 
 ### 3. Settings you can use (already in the program, nothing changed)
 
@@ -68,7 +74,8 @@ Reference values measured from the skin images (RGB 0–255):
 1. Push the repo contents above to GitHub.
 2. **Actions** tab → *Build Digital Clock (flip animation)* → **Run workflow**.
 3. When it finishes (about 10 minutes), open the run, scroll to **Artifacts**, download
-   **digital_clock-flip-exe** and unzip it.
+   **digital_clock-flip-build** and unzip it. It contains `digital_clock.exe` and
+   `plugins\countdown_timer.dll`.
 
 What the workflow does: installs Qt **5.12.9** (MinGW 7.3 32-bit, the same toolchain as the
 official 4.7.8 build, so it works with your existing DLLs), clones the `stable_4.7.8` source and the
@@ -80,7 +87,8 @@ Whenever you change `flip-animation.patch`, run the workflow again to get a new 
 ## Installing
 
 1. Close Digital Clock (tray icon → Exit).
-2. Copy the new `digital_clock.exe` over the old one in `Digital Clock 4\`.
+2. Copy the new `digital_clock.exe` over the old one in `Digital Clock 4\`, and the new
+   `countdown_timer.dll` over the old one in `Digital Clock 4\plugins\`.
 3. Copy the `flipclock-hd` folder into `Digital Clock 4\skins\` (overwrite).
 4. Start the clock, choose **Flipclock HD** in settings. Optional: tick **separator flashes**,
    **transparent for mouse**, or **Colorize**.
@@ -93,6 +101,8 @@ Whenever you change `flip-animation.patch`, run the workflow again to get a new 
 |---|---|---|
 | Flip speed | `flip_animator.cpp`, constructor: `duration_(420)` | 420 ms |
 | Flip frame interval | `flip_animator.cpp`: `timer_.setInterval(15)` | 15 ms |
+| Time-up colour of the countdown | `countdown_timer_plugin.cpp`, `Tinted()`: `QColor(215, 25, 25)` | red |
+| Process priority | `main.cpp`: `HIGH_PRIORITY_CLASS` (use `ABOVE_NORMAL_PRIORITY_CLASS` for gentler) | High |
 | Flap shading while flipping | `flip_animator.cpp`, `drawFlap(...)` calls: `0.55` | up to 55 % black |
 | Which skins flip / get card-colorize | `clock_widget.cpp`, `OPT_SKIN_NAME`: name contains `"flip"` | any skin with "flip" in its name |
 | Narrowest "card" that flips | `flip_animator.cpp`: `r.width() * 10 < widest * 6` | cells under 60 % of the widest are treated as separators |
