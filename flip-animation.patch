@@ -31,7 +31,7 @@ index 468f70f..60bc5c0 100644
      gui/plugin_info_dialog.h \
      gui/plugin_list_item_widget.h \
 diff --git a/digital_clock/gui/clock_widget.cpp b/digital_clock/gui/clock_widget.cpp
-index e756e5d..26b8f37 100644
+index e756e5d..38eaebc 100644
 --- a/digital_clock/gui/clock_widget.cpp
 +++ b/digital_clock/gui/clock_widget.cpp
 @@ -25,12 +25,14 @@
@@ -75,10 +75,28 @@ index e756e5d..26b8f37 100644
      case OPT_SEPARATOR_FLASH:
        display_->SetSeparatorFlash(value.toBool());
        break;
-@@ -198,6 +210,35 @@ void ClockWidget::TimeoutHandler()
+@@ -198,15 +210,45 @@ void ClockWidget::TimeoutHandler()
    display_->TimeoutHandler();
  }
  
+-void ClockWidget::DrawImage(const QImage& image)
++QImage ClockWidget::ApplyColorize(const QImage& image) const
+ {
+-  if (colorize_enabled_) {
+-    QImage dst_image;
++  if (!colorize_enabled_) return image;
++  QImage dst_image;
++  // flip skins: tint only the dark card body, keep the digits untouched
++  if (flip_enabled_)
++    colorize_cards(image, dst_image, colorize_color_, colorize_level_);
++  else
+     colorize_image(image, dst_image, colorize_color_, colorize_level_);
+-    display_->DrawImage(dst_image);
+-  } else {
+-    display_->DrawImage(image);
++  return dst_image;
++}
++
 +void ClockWidget::OnDrawingFinished(const QImage& image)
 +{
 +  // flip also runs while the settings dialog is open (preview mode); a size
@@ -88,31 +106,29 @@ index e756e5d..26b8f37 100644
 +  text_changed_ = false;
 +
 +  if (animate) {
-+    // if the previous flip is still running, jump to its end state first
-+    const QImage from = last_image_;
++    // frames are built from already colorized images
++    const QImage from = ApplyColorize(last_image_);
++    const QImage to = ApplyColorize(image);
 +    last_image_ = image;
-+    if (flip_->start(from, image)) return;
-+  }
++    if (flip_->start(from, to)) return;
+   }
 +  flip_->stop();
 +  DrawImage(image);
 +}
 +
 +void ClockWidget::ShowFrame(const QImage& image)
 +{
-+  if (colorize_enabled_) {
-+    QImage dst_image;
-+    colorize_image(image, dst_image, colorize_color_, colorize_level_);
-+    display_->DrawImage(dst_image);
-+  } else {
-+    display_->DrawImage(image);
-+  }
++  display_->DrawImage(image);
 +}
 +
- void ClockWidget::DrawImage(const QImage& image)
- {
-   if (colorize_enabled_) {
++void ClockWidget::DrawImage(const QImage& image)
++{
++  display_->DrawImage(ApplyColorize(image));
+   last_image_ = image;
+ }
+ 
 diff --git a/digital_clock/gui/clock_widget.h b/digital_clock/gui/clock_widget.h
-index 66ad748..66cd09f 100644
+index 66ad748..713e129 100644
 --- a/digital_clock/gui/clock_widget.h
 +++ b/digital_clock/gui/clock_widget.h
 @@ -35,6 +35,7 @@ namespace digital_clock {
@@ -123,7 +139,7 @@ index 66ad748..66cd09f 100644
  
  class ClockWidget : public QWidget
  {
-@@ -60,10 +61,15 @@ public slots:
+@@ -60,10 +61,17 @@ public slots:
  
  private slots:
    void DrawImage(const QImage& image);
@@ -131,6 +147,8 @@ index 66ad748..66cd09f 100644
 +  void ShowFrame(const QImage& image);
  
  private:
++  QImage ApplyColorize(const QImage& image) const;
++
    ClockDisplay* display_;
    ::skin_draw::SkinDrawer* drawer_;
 +  FlipAnimator* flip_;
@@ -139,6 +157,130 @@ index 66ad748..66cd09f 100644
  
    QColor colorize_color_;
    qreal colorize_level_;
+diff --git a/digital_clock/gui/colorize_effect.cpp b/digital_clock/gui/colorize_effect.cpp
+index dbf28cb..6192781 100644
+--- a/digital_clock/gui/colorize_effect.cpp
++++ b/digital_clock/gui/colorize_effect.cpp
+@@ -17,6 +17,10 @@
+  */
+ 
+ #include <QPainter>
++#include <QVector>
++#include <algorithm>
++
++#include "flip_animator.h"
+ 
+ namespace digital_clock {
+ namespace gui {
+@@ -96,5 +100,89 @@ void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& col
+     destImage.setAlphaChannel(srcImage.alphaChannel());
+ }
+ 
++void colorize_cards(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength)
++{
++  strength = qBound(qreal(0), strength, qreal(1));
++  if (srcImage.isNull() || qFuzzyIsNull(strength)) {
++    destImage = srcImage;
++    return;
++  }
++
++  const QImage src = srcImage.convertToFormat(QImage::Format_ARGB32);
++  QImage dst = src.copy();
++  const int h = src.height();
++  const int mid = h / 2;
++  const int band = std::max(2, h * 15 / 1000);   // rows around the seam
++
++  const QVector<QRect> cells = FlipAnimator::findCells(src);
++  int widest = 0;
++  for (const QRect& r : cells) widest = std::max(widest, r.width());
++
++  const qreal cr = color.red(), cg = color.green(), cb = color.blue();
++
++  for (const QRect& cell : cells) {
++    if (cell.width() * 10 < widest * 6) continue;   // separators: leave as is
++
++    // per half: card body level = most frequent grey, digit level = brightest
++    int body[2] = {0, 0};
++    int digit[2] = {255, 255};
++    for (int half = 0; half < 2; ++half) {
++      const int y0 = half ? mid + band : 0;
++      const int y1 = half ? h : mid - band;
++      int hist[256] = {0};
++      int mx = 0;
++      for (int y = y0; y < y1; ++y) {
++        const QRgb* line = reinterpret_cast<const QRgb*>(src.constScanLine(y));
++        for (int x = cell.left(); x <= cell.right(); ++x) {
++          if (qAlpha(line[x]) < 250) continue;
++          const int g = qGray(line[x]);
++          ++hist[g];
++          mx = std::max(mx, g);
++        }
++      }
++      int mode = 0;
++      for (int i = 1; i < 256; ++i) if (hist[i] > hist[mode]) mode = i;
++      body[half] = std::max(1, mode);
++      // digit face = most frequent bright level (ignores rare edge highlights)
++      int dmode = -1;
++      for (int i = std::min(255, mode + 40); i < 256; ++i)
++        if (hist[i] > 0 && (dmode < 0 || hist[i] > hist[dmode])) dmode = i;
++      digit[half] = dmode >= 0 ? dmode : 255;
++      (void)mx;
++    }
++
++    for (int y = 0; y < h; ++y) {
++      const int half = y < mid ? 0 : 1;
++      const QRgb* in = reinterpret_cast<const QRgb*>(src.constScanLine(y));
++      QRgb* out = reinterpret_cast<QRgb*>(dst.scanLine(y));
++      const qreal span = std::max(1, digit[half] - body[half]);
++      for (int x = cell.left(); x <= cell.right(); ++x) {
++        const QRgb p = in[x];
++        const int a = qAlpha(p);
++        if (a == 0) continue;
++        const int g = qGray(p);
++        // c: how much of this pixel is the digit (0 = card body, 1 = digit)
++        const qreal c = qBound(qreal(0), (g - body[half]) / span, qreal(1));
++        // card shading relative to the top half body, seam/shadows get darker
++        const qreal k = std::min(qreal(1), std::min<qreal>(g, body[half]) / body[0]);
++        const qreal tr = cr * k, tg = cg * k, tb = cb * k;
++        const qreal d = digit[half];
++        const qreal nr = c * d + (1 - c) * tr;
++        const qreal ng = c * d + (1 - c) * tg;
++        const qreal nb = c * d + (1 - c) * tb;
++        const qreal r = qRed(p) + (nr - qRed(p)) * strength;
++        const qreal gg = qGreen(p) + (ng - qGreen(p)) * strength;
++        const qreal b = qBlue(p) + (nb - qBlue(p)) * strength;
++        out[x] = qRgba(qBound(0, int(r + 0.5), 255), qBound(0, int(gg + 0.5), 255),
++                       qBound(0, int(b + 0.5), 255), a);
++      }
++    }
++  }
++
++  dst.setDevicePixelRatio(srcImage.devicePixelRatio());
++  destImage = dst.convertToFormat(srcImage.format());
++  destImage.setDevicePixelRatio(srcImage.devicePixelRatio());
++}
++
+ } // namespace gui
+ } // namespace digital_clock
+diff --git a/digital_clock/gui/colorize_effect.h b/digital_clock/gui/colorize_effect.h
+index 38fb29e..ea85823 100644
+--- a/digital_clock/gui/colorize_effect.h
++++ b/digital_clock/gui/colorize_effect.h
+@@ -27,6 +27,14 @@ namespace gui {
+ 
+ void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength);
+ 
++/*!
++ * Colorizes only the dark card body of flip-clock style skins (cards = runs of
++ * non-transparent columns, split into top/bottom halves). The bright digit and
++ * its grey lower half keep their original colors, the card keeps its relative
++ * top/bottom shading and the seam stays dark.
++ */
++void colorize_cards(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength);
++
+ } // namespace gui
+ } // namespace digital_clock
+ 
 diff --git a/digital_clock/gui/flip_animator.cpp b/digital_clock/gui/flip_animator.cpp
 new file mode 100644
 index 0000000..f0f7241
