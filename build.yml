@@ -22,11 +22,19 @@ jobs:
           host: 'windows'
           target: 'desktop'
           arch: 'win32_mingw73'
-          tools: 'tools_mingw,7.3.0-1-1,qt.tools.win32_mingw730'
-          cache: true
+          cache: false
 
-      - name: Put MinGW on PATH
-        run: echo "$IQTA_TOOLS/mingw730_32/bin" >> "$GITHUB_PATH"
+      - name: Install the MinGW 7.3 32-bit compiler that matches Qt
+        run: |
+          python -m pip install aqtinstall==3.1.*
+          python -m aqt install-tool windows desktop tools_mingw qt.tools.win32_mingw730 --outputdir "$GITHUB_WORKSPACE/Qt"
+          echo "$GITHUB_WORKSPACE/Qt/Tools/mingw730_32/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          g++ --version
+          qmake -v
+          mingw32-make --version | head -n1
 
       - name: Get source (tag stable_4.7.8) and dependencies
         run: |
@@ -36,6 +44,8 @@ jobs:
           mkdir 3rdparty
           git clone --depth 1 https://github.com/Skycoder42/QHotkey.git 3rdparty/QHotkey
           git clone --depth 1 https://github.com/itay-grudev/SingleApplication.git 3rdparty/SingleApplication
+          # the countdown timer plugin looks for QHotkey inside the source tree
+          git clone --depth 1 https://github.com/Skycoder42/QHotkey.git DigitalClock4/3rdparty/QHotkey
 
       - name: Apply flip animation patch
         run: |
@@ -55,14 +65,23 @@ jobs:
           qmake -config release -r
           mingw32-make -j4
 
+      - name: Build countdown timer plugin
+        run: |
+          cd work/DigitalClock4/plugins/countdown_timer
+          lupdate -no-obsolete countdown_timer.pro
+          qmake -config release countdown_timer.pro
+          mingw32-make -j4
+
       - name: Collect result
         run: |
-          mkdir out
+          mkdir -p out/plugins
           EXE=$(find work/DigitalClock4 -name digital_clock.exe | head -n1)
-          echo "Built: $EXE"
+          DLL=$(find work/DigitalClock4/plugins/countdown_timer -name countdown_timer.dll | head -n1)
+          echo "Built: $EXE and $DLL"
           cp "$EXE" out/digital_clock.exe
+          cp "$DLL" out/plugins/countdown_timer.dll
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digital_clock-flip-exe
-          path: out/digital_clock.exe
+          name: digital_clock-flip-build
+          path: out
