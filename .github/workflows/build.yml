@@ -44,6 +44,8 @@ jobs:
           mkdir 3rdparty
           git clone --depth 1 https://github.com/Skycoder42/QHotkey.git 3rdparty/QHotkey
           git clone --depth 1 https://github.com/itay-grudev/SingleApplication.git 3rdparty/SingleApplication
+          # the countdown timer plugin looks for QHotkey inside the source tree
+          git clone --depth 1 https://github.com/Skycoder42/QHotkey.git DigitalClock4/3rdparty/QHotkey
 
       - name: Apply flip animation patch
         run: |
@@ -63,14 +65,23 @@ jobs:
           qmake -config release -r
           mingw32-make -j4
 
+      - name: Build countdown timer plugin
+        run: |
+          cd work/DigitalClock4/plugins/countdown_timer
+          lupdate -no-obsolete countdown_timer.pro
+          qmake -config release countdown_timer.pro
+          mingw32-make -j4
+
       - name: Collect result
         run: |
-          mkdir out
+          mkdir -p out/plugins
           EXE=$(find work/DigitalClock4 -name digital_clock.exe | head -n1)
-          echo "Built: $EXE"
+          DLL=$(find work/DigitalClock4/plugins/countdown_timer -name countdown_timer.dll | head -n1)
+          echo "Built: $EXE and $DLL"
           cp "$EXE" out/digital_clock.exe
+          cp "$DLL" out/plugins/countdown_timer.dll
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digital_clock-flip-exe
-          path: out/digital_clock.exe
+          name: digital_clock-flip-build
+          path: out
