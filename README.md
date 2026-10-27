@@ -1,6 +1,10 @@
 # Digital Clock 4 – Flipclock HD with Real Flip
 
-<img width="4032" height="1067" alt="image" src="https://github.com/user-attachments/assets/8b77d117-ecdf-45c5-8d8a-810b4f305530" />
+![Clock Preview](J%20Clock%20Preview.gif)
+
+<img src="J%20Clock%20Preview.gif" alt="Clock Preview" width="800">
+
+<img width="2961" height="2268" alt="image" src="https://github.com/user-attachments/assets/37507ee1-9ec9-4e6d-8888-4eddb64bc8e7" />
 
 
 A customised build of [Digital Clock 4](https://github.com/Kolcha/DigitalClock4) (v4.7.8, Windows portable)
@@ -131,7 +135,8 @@ Whenever you change `flip-animation.patch`, run the workflow again to get a new 
 
 If you like my patches, now you can "say thanks" by donating any crypto to my Ethereum (EVM-multichain wallet) address 0xBdbA6B84Ca1A2DA181cE1BBA9b8F2B1dDdae355D 
 
-<img width="4032" height="1273" alt="image" src="https://github.com/user-attachments/assets/6465a9ab-2c24-4eab-a287-ddaf05e87e4a" />
+<img width="4032" height="1083" alt="image" src="https://github.com/user-attachments/assets/ae5e7c33-9606-40be-b5a5-c21e65088f15" />
+
 
 
 donate
