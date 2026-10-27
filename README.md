@@ -1,6 +1,6 @@
 # Digital Clock 4 – Flipclock HD with Real Flip
 
-![Clock Preview](J%20Clock%20Preview.gif)
+![Clock Preview](https://github.com/Dadjosm/Digital-Clock-4-HD-Real-Flip-with-dot/blob/a0b0d77c697475588759db22c1b412f225aa0781/J%20Clock%20Preview.gif?raw=true)
 
 A customised build of [Digital Clock 4](https://github.com/Kolcha/DigitalClock4) (v4.7.8, Windows portable)
 with an improved **Flipclock HD** skin and a real **card-flip animation**.
@@ -130,7 +130,7 @@ Whenever you change `flip-animation.patch`, run the workflow again to get a new 
 
 If you like my patches, now you can "say thanks" by donating any crypto to my Ethereum (EVM-multichain wallet) address 0xBdbA6B84Ca1A2DA181cE1BBA9b8F2B1dDdae355D 
 
-<img width="4032" height="1083" alt="image" src="https://github.com/user-attachments/assets/ae5e7c33-9606-40be-b5a5-c21e65088f15" />
+<img src="https://github.com/Dadjosm/Digital-Clock-4-HD-Real-Flip-with-dot/blob/a0b0d77c697475588759db22c1b412f225aa0781/0xBdbA6B84Ca1A2DA181cE1BBA9b8F2B1dDdae355D.jpg?raw=true" width="600" alt="Donation QR">
 
 
 
