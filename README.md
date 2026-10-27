@@ -2,11 +2,6 @@
 
 ![Clock Preview](J%20Clock%20Preview.gif)
 
-<img src="J%20Clock%20Preview.gif" alt="Clock Preview" width="800">
-
-<img width="2961" height="2268" alt="image" src="https://github.com/user-attachments/assets/37507ee1-9ec9-4e6d-8888-4eddb64bc8e7" />
-
-
 A customised build of [Digital Clock 4](https://github.com/Kolcha/DigitalClock4) (v4.7.8, Windows portable)
 with an improved **Flipclock HD** skin and a real **card-flip animation**.
 
