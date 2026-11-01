@@ -30,12 +30,34 @@ index 468f70f..60bc5c0 100644
      gui/hover_buttons.h \
      gui/plugin_info_dialog.h \
      gui/plugin_list_item_widget.h \
+diff --git a/digital_clock/gui/clock_display.cpp b/digital_clock/gui/clock_display.cpp
+index 5f11e61..c1e8894 100644
+--- a/digital_clock/gui/clock_display.cpp
++++ b/digital_clock/gui/clock_display.cpp
+@@ -177,10 +177,12 @@ void ClockDisplay::TimeoutHandler()
+   }
+ 
+   if (sep_flashes_) {
++    // blink follows the wall clock (shown during the first half of the
++    // second), not the state of the previous refresh
++    sep_visible_ = dt.time().msec() < 500;
+     for (auto& sep_pos : qAsConst(seps_pos)) {
+       if (!sep_visible_) str_time[sep_pos] = ' ';
+     }
+-    sep_visible_ = dt.time().msec() < 500; // !sep_visible_;
+   }
+   emit ImageNeeded(str_time);
+ }
 diff --git a/digital_clock/gui/clock_widget.cpp b/digital_clock/gui/clock_widget.cpp
-index e756e5d..38eaebc 100644
+index e756e5d..c3723a5 100644
 --- a/digital_clock/gui/clock_widget.cpp
 +++ b/digital_clock/gui/clock_widget.cpp
-@@ -25,12 +25,14 @@
+@@ -23,14 +23,18 @@
  
+ #include "skin_drawer.h"
+ 
++#include <QTime>
++
  #include "gui/clock_display.h"
  #include "gui/colorize_effect.h"
 +#include "gui/flip_animator.h"
@@ -49,12 +71,16 @@ index e756e5d..38eaebc 100644
    colorize_color_(Qt::magenta), colorize_level_(0.8), colorize_enabled_(false)
  {
    display_ = new ClockDisplay(this);
-@@ -45,7 +47,11 @@ ClockWidget::ClockWidget(QWidget* parent) :
+@@ -45,7 +49,15 @@ ClockWidget::ClockWidget(QWidget* parent) :
    drawer_->SetDevicePixelRatio(this->devicePixelRatioF());
    connect(display_, SIGNAL(SeparatorsChanged(QString)), this, SIGNAL(SeparatorsChanged(QString)));
    connect(display_, SIGNAL(ImageNeeded(QString)), drawer_, SLOT(SetString(QString)));
 -  connect(drawer_, SIGNAL(DrawingFinished(QImage)), this, SLOT(DrawImage(QImage)));
 +  flip_ = new FlipAnimator(this);
++  sync_timer_ = new QTimer(this);
++  sync_timer_->setSingleShot(true);
++  sync_timer_->setTimerType(Qt::PreciseTimer);
++  connect(sync_timer_, &QTimer::timeout, this, &ClockWidget::SyncTick);
 +  connect(drawer_, &skin_draw::SkinDrawer::textChanged, this, [this]() { text_changed_ = true; });
 +  connect(drawer_, SIGNAL(DrawingFinished(QImage)), this, SLOT(OnDrawingFinished(QImage)));
 +  connect(flip_, &FlipAnimator::frameReady, this, &ClockWidget::ShowFrame);
@@ -62,20 +88,25 @@ index e756e5d..38eaebc 100644
    connect(drawer_, &skin_draw::SkinDrawer::skinChanged, this, &ClockWidget::SkinChanged);
  }
  
-@@ -67,6 +73,12 @@ void ClockWidget::ApplySkin(skin_draw::ISkin::SkinPtr skin)
+@@ -67,6 +79,17 @@ void ClockWidget::ApplySkin(skin_draw::ISkin::SkinPtr skin)
  void ClockWidget::ApplyOption(Option option, const QVariant& value)
  {
    switch (option) {
 +    case OPT_SKIN_NAME:
 +      // flip transition is used by all skins with 'flip' in their name
 +      flip_enabled_ = value.toString().contains("flip", Qt::CaseInsensitive);
-+      if (!flip_enabled_) flip_->stop();
++      if (!flip_enabled_) {
++        flip_->stop();
++        sync_timer_->stop();
++      } else {
++        ScheduleSync();
++      }
 +      break;
 +
      case OPT_SEPARATOR_FLASH:
        display_->SetSeparatorFlash(value.toBool());
        break;
-@@ -198,15 +210,45 @@ void ClockWidget::TimeoutHandler()
+@@ -198,16 +221,81 @@ void ClockWidget::TimeoutHandler()
    display_->TimeoutHandler();
  }
  
@@ -97,23 +128,58 @@ index e756e5d..38eaebc 100644
 +  return dst_image;
 +}
 +
++void ClockWidget::Remember(const QImage& raw, const QImage& colored)
++{
++  last_image_ = raw;
++  last_colored_ = colored;
++}
++
++// Flip skins are refreshed exactly on every half second (the digits change on
++// the full second, the separator blinks on the half) instead of whenever the
++// periodic refresh timer happens to fire. That removes up to 0.5 s of random
++// delay and the uneven 0.5/1.0/1.5 s gaps between flips.
++void ClockWidget::ScheduleSync()
++{
++  if (!flip_enabled_) return;
++  const int ms = QTime::currentTime().msec();
++  sync_timer_->start(500 - (ms % 500) + 4);
++}
++
++void ClockWidget::SyncTick()
++{
++  if (!flip_enabled_) return;
++  display_->TimeoutHandler();
++  ScheduleSync();
++}
++
 +void ClockWidget::OnDrawingFinished(const QImage& image)
 +{
++  const bool changed = text_changed_;
++  text_changed_ = false;
++
++  // colorize once, here; frames are built from already colorized images
++  const QImage to = ApplyColorize(image);
++
++  // a flip is running and only something outside the flipping cards changed
++  // (separator blink): keep flipping, just update the target
++  if (flip_->isRunning() && flip_->retarget(to)) {
++    Remember(image, to);
++    return;
++  }
++
 +  // flip also runs while the settings dialog is open (preview mode); a size
 +  // change (skin/zoom edited in the dialog) makes start() refuse, so only real
 +  // time/countdown changes are animated
-+  const bool animate = flip_enabled_ && text_changed_ && !last_image_.isNull();
-+  text_changed_ = false;
-+
-+  if (animate) {
-+    // frames are built from already colorized images
-+    const QImage from = ApplyColorize(last_image_);
-+    const QImage to = ApplyColorize(image);
-+    last_image_ = image;
++  if (flip_enabled_ && changed && !last_colored_.isNull()) {
++    const QImage from = last_colored_;
++    Remember(image, to);
 +    if (flip_->start(from, to)) return;
    }
+-  last_image_ = image;
++
 +  flip_->stop();
-+  DrawImage(image);
++  display_->DrawImage(to);
++  Remember(image, to);
 +}
 +
 +void ClockWidget::ShowFrame(const QImage& image)
@@ -123,15 +189,25 @@ index e756e5d..38eaebc 100644
 +
 +void ClockWidget::DrawImage(const QImage& image)
 +{
-+  display_->DrawImage(ApplyColorize(image));
-   last_image_ = image;
++  const QImage colored = ApplyColorize(image);
++  display_->DrawImage(colored);
++  Remember(image, colored);
  }
  
+ } // namespace gui
 diff --git a/digital_clock/gui/clock_widget.h b/digital_clock/gui/clock_widget.h
-index 66ad748..713e129 100644
+index 66ad748..3bf9f47 100644
 --- a/digital_clock/gui/clock_widget.h
 +++ b/digital_clock/gui/clock_widget.h
-@@ -35,6 +35,7 @@ namespace digital_clock {
+@@ -20,6 +20,7 @@
+ #define DIGITAL_CLOCK_GUI_CLOCK_WIDGET_H
+ 
+ #include <QWidget>
++#include <QTimer>
+ 
+ #include <QColor>
+ #include <QImage>
+@@ -35,6 +36,7 @@ namespace digital_clock {
  namespace gui {
  
  class ClockDisplay;
@@ -139,26 +215,37 @@ index 66ad748..713e129 100644
  
  class ClockWidget : public QWidget
  {
-@@ -60,10 +61,17 @@ public slots:
+@@ -60,16 +62,28 @@ public slots:
  
  private slots:
    void DrawImage(const QImage& image);
 +  void OnDrawingFinished(const QImage& image);
 +  void ShowFrame(const QImage& image);
++  void SyncTick();
  
  private:
 +  QImage ApplyColorize(const QImage& image) const;
++  void Remember(const QImage& raw, const QImage& colored);
++  void ScheduleSync();
 +
    ClockDisplay* display_;
    ::skin_draw::SkinDrawer* drawer_;
 +  FlipAnimator* flip_;
++  QTimer* sync_timer_;
 +  bool flip_enabled_;
 +  bool text_changed_;
  
    QColor colorize_color_;
    qreal colorize_level_;
+   bool colorize_enabled_;
+ 
+   QImage last_image_;
++  QImage last_colored_;
+ };
+ 
+ } // namespace gui
 diff --git a/digital_clock/gui/colorize_effect.cpp b/digital_clock/gui/colorize_effect.cpp
-index dbf28cb..6192781 100644
+index dbf28cb..9913010 100644
 --- a/digital_clock/gui/colorize_effect.cpp
 +++ b/digital_clock/gui/colorize_effect.cpp
 @@ -17,6 +17,10 @@
@@ -172,7 +259,7 @@ index dbf28cb..6192781 100644
  
  namespace digital_clock {
  namespace gui {
-@@ -96,5 +100,89 @@ void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& col
+@@ -96,5 +100,95 @@ void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& col
      destImage.setAlphaChannel(srcImage.alphaChannel());
  }
  
@@ -189,68 +276,74 @@ index dbf28cb..6192781 100644
 +  const int h = src.height();
 +  const int mid = h / 2;
 +  const int band = std::max(2, h * 15 / 1000);   // rows around the seam
++  const int s256 = int(strength * 256 + 0.5);
 +
 +  const QVector<QRect> cells = FlipAnimator::findCells(src);
 +  int widest = 0;
 +  for (const QRect& r : cells) widest = std::max(widest, r.width());
 +
-+  const qreal cr = color.red(), cg = color.green(), cb = color.blue();
-+
 +  for (const QRect& cell : cells) {
 +    if (cell.width() * 10 < widest * 6) continue;   // separators: leave as is
 +
-+    // per half: card body level = most frequent grey, digit level = brightest
-+    int body[2] = {0, 0};
++    // per half: card body level = most frequent grey, digit level = most
++    // frequent bright grey (every 2nd pixel is enough for that)
++    int body[2] = {1, 1};
 +    int digit[2] = {255, 255};
 +    for (int half = 0; half < 2; ++half) {
 +      const int y0 = half ? mid + band : 0;
 +      const int y1 = half ? h : mid - band;
 +      int hist[256] = {0};
-+      int mx = 0;
-+      for (int y = y0; y < y1; ++y) {
++      for (int y = y0; y < y1; y += 2) {
 +        const QRgb* line = reinterpret_cast<const QRgb*>(src.constScanLine(y));
-+        for (int x = cell.left(); x <= cell.right(); ++x) {
++        for (int x = cell.left(); x <= cell.right(); x += 2) {
 +          if (qAlpha(line[x]) < 250) continue;
-+          const int g = qGray(line[x]);
-+          ++hist[g];
-+          mx = std::max(mx, g);
++          ++hist[qGray(line[x])];
 +        }
 +      }
 +      int mode = 0;
 +      for (int i = 1; i < 256; ++i) if (hist[i] > hist[mode]) mode = i;
 +      body[half] = std::max(1, mode);
-+      // digit face = most frequent bright level (ignores rare edge highlights)
 +      int dmode = -1;
 +      for (int i = std::min(255, mode + 40); i < 256; ++i)
 +        if (hist[i] > 0 && (dmode < 0 || hist[i] > hist[dmode])) dmode = i;
 +      digit[half] = dmode >= 0 ? dmode : 255;
-+      (void)mx;
++    }
++
++    // lookup tables (per half, per grey level): share of digit in the pixel
++    // and the tinted card colour (card shading is relative to the top half)
++    int lut_c[2][256];
++    int lut_r[2][256], lut_g[2][256], lut_b[2][256];
++    for (int half = 0; half < 2; ++half) {
++      const qreal span = std::max(1, digit[half] - body[half]);
++      for (int g = 0; g < 256; ++g) {
++        const qreal c = qBound(qreal(0), (g - body[half]) / span, qreal(1));
++        const qreal k = std::min(qreal(1), std::min<qreal>(g, body[half]) / body[0]);
++        lut_c[half][g] = int(c * 256 + 0.5);
++        lut_r[half][g] = int(color.red() * k + 0.5);
++        lut_g[half][g] = int(color.green() * k + 0.5);
++        lut_b[half][g] = int(color.blue() * k + 0.5);
++      }
 +    }
 +
 +    for (int y = 0; y < h; ++y) {
 +      const int half = y < mid ? 0 : 1;
++      const int d = digit[half];
++      const int* lc = lut_c[half];
 +      const QRgb* in = reinterpret_cast<const QRgb*>(src.constScanLine(y));
 +      QRgb* out = reinterpret_cast<QRgb*>(dst.scanLine(y));
-+      const qreal span = std::max(1, digit[half] - body[half]);
 +      for (int x = cell.left(); x <= cell.right(); ++x) {
 +        const QRgb p = in[x];
 +        const int a = qAlpha(p);
 +        if (a == 0) continue;
 +        const int g = qGray(p);
-+        // c: how much of this pixel is the digit (0 = card body, 1 = digit)
-+        const qreal c = qBound(qreal(0), (g - body[half]) / span, qreal(1));
-+        // card shading relative to the top half body, seam/shadows get darker
-+        const qreal k = std::min(qreal(1), std::min<qreal>(g, body[half]) / body[0]);
-+        const qreal tr = cr * k, tg = cg * k, tb = cb * k;
-+        const qreal d = digit[half];
-+        const qreal nr = c * d + (1 - c) * tr;
-+        const qreal ng = c * d + (1 - c) * tg;
-+        const qreal nb = c * d + (1 - c) * tb;
-+        const qreal r = qRed(p) + (nr - qRed(p)) * strength;
-+        const qreal gg = qGreen(p) + (ng - qGreen(p)) * strength;
-+        const qreal b = qBlue(p) + (nb - qBlue(p)) * strength;
-+        out[x] = qRgba(qBound(0, int(r + 0.5), 255), qBound(0, int(gg + 0.5), 255),
-+                       qBound(0, int(b + 0.5), 255), a);
++        const int c = lc[g];
++        const int nr = (c * d + (256 - c) * lut_r[half][g]) >> 8;
++        const int ng = (c * d + (256 - c) * lut_g[half][g]) >> 8;
++        const int nb = (c * d + (256 - c) * lut_b[half][g]) >> 8;
++        const int r = qRed(p) + (((nr - qRed(p)) * s256) / 256);
++        const int gg = qGreen(p) + (((ng - qGreen(p)) * s256) / 256);
++        const int b = qBlue(p) + (((nb - qBlue(p)) * s256) / 256);
++        out[x] = qRgba(qBound(0, r, 255), qBound(0, gg, 255), qBound(0, b, 255), a);
 +      }
 +    }
 +  }
@@ -283,10 +376,10 @@ index 38fb29e..ea85823 100644
  
 diff --git a/digital_clock/gui/flip_animator.cpp b/digital_clock/gui/flip_animator.cpp
 new file mode 100644
-index 0000000..f0f7241
+index 0000000..413b8c8
 --- /dev/null
 +++ b/digital_clock/gui/flip_animator.cpp
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,239 @@
 +/*
 +    Digital Clock - beautiful customizable clock with plugins
 +    Flip-card transition (added for Flipclock skins).
@@ -366,8 +459,48 @@ index 0000000..f0f7241
 +  }
 +  if (cells_.isEmpty()) return false;
 +
++  // everything that does not change between frames is prepared right here
++  flaps_.clear();
++  for (const QRect& r : qAsConst(cells_)) {
++    Flap f;
++    f.rect = r;
++    f.top_h = r.height() / 2;
++    f.bot_h = r.height() - f.top_h;
++    f.old_top = from_.copy(QRect(r.left(), r.top(), r.width(), f.top_h));
++    f.new_bottom = to_.copy(QRect(r.left(), r.top() + f.top_h, r.width(), f.bot_h));
++    flaps_.append(f);
++  }
++  buildBase();
++
 +  clock_.start();
 +  timer_.start();
++  return true;
++}
++
++void FlipAnimator::buildBase()
++{
++  base_ = to_.copy();
++  QPainter p(&base_);
++  for (const Flap& f : qAsConst(flaps_)) {
++    const QRect top(f.rect.left(), f.rect.top(), f.rect.width(), f.top_h);
++    const QRect bot(f.rect.left(), f.rect.top() + f.top_h, f.rect.width(), f.bot_h);
++    p.setCompositionMode(QPainter::CompositionMode_Source);
++    p.fillRect(f.rect, Qt::transparent);
++    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++    p.drawImage(top.topLeft(), to_, top);     // new top half
++    p.drawImage(bot.topLeft(), from_, bot);   // old bottom half
++  }
++  p.end();
++}
++
++bool FlipAnimator::retarget(const QImage& to)
++{
++  if (!timer_.isActive() || to.isNull() || to.size() != to_.size()) return false;
++  const QImage nt = to.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++  for (const Flap& f : qAsConst(flaps_))
++    if (regionDiffers(to_, nt, f.rect)) return false;
++  to_ = nt;
++  buildBase();
 +  return true;
 +}
 +
@@ -375,6 +508,8 @@ index 0000000..f0f7241
 +{
 +  timer_.stop();
 +  cells_.clear();
++  flaps_.clear();
++  base_ = QImage();
 +}
 +
 +void FlipAnimator::tick()
@@ -383,10 +518,12 @@ index 0000000..f0f7241
 +  if (p >= 1.0) {
 +    timer_.stop();
 +    cells_.clear();
++    flaps_.clear();
++    base_ = QImage();
 +    emit finished(to_);
 +    return;
 +  }
-+  emit frameReady(renderFrame(from_, to_, cells_, p));
++  emit frameReady(renderFast(p));
 +}
 +
 +static void drawFlap(QPainter& painter, const QImage& src, const QRect& srcRect,
@@ -405,6 +542,35 @@ index 0000000..f0f7241
 +    fp.fillRect(flap.rect(), g);
 +  }
 +  painter.drawImage(target, flap);
++}
++
++QImage FlipAnimator::renderFast(qreal progress) const
++{
++  QImage out = base_.copy();
++  QPainter p(&out);
++  p.setRenderHint(QPainter::SmoothPixmapTransform, true);
++
++  const qreal e = progress < 0.5 ? 2 * progress * progress
++                                 : 1 - qPow(-2 * progress + 2, 2) / 2;
++  const qreal c = qCos(M_PI * e);
++
++  for (const Flap& f : qAsConst(flaps_)) {
++    const qreal hinge = f.rect.top() + f.top_h;
++    if (c >= 0) {
++      const qreal hh = f.top_h * c;
++      drawFlap(p, f.old_top, f.old_top.rect(),
++               QRectF(f.rect.left(), hinge - hh, f.rect.width(), hh),
++               0.55 * (1 - c), true);
++    } else {
++      const qreal hh = f.bot_h * (-c);
++      drawFlap(p, f.new_bottom, f.new_bottom.rect(),
++               QRectF(f.rect.left(), hinge, f.rect.width(), hh),
++               0.55 * (1 + c), false);
++    }
++  }
++  p.end();
++  out.setDevicePixelRatio(to_.devicePixelRatio());
++  return out;
 +}
 +
 +QImage FlipAnimator::renderFrame(const QImage& from, const QImage& to,
@@ -455,10 +621,10 @@ index 0000000..f0f7241
 +} // namespace digital_clock
 diff --git a/digital_clock/gui/flip_animator.h b/digital_clock/gui/flip_animator.h
 new file mode 100644
-index 0000000..94bb359
+index 0000000..ecf943a
 --- /dev/null
 +++ b/digital_clock/gui/flip_animator.h
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,88 @@
 +/*
 +    Digital Clock - beautiful customizable clock with plugins
 +    Flip-card transition (added for Flipclock skins).
@@ -504,6 +670,10 @@ index 0000000..94bb359
 +  bool start(const QImage& from, const QImage& to);
 +  /// Stops animation without emitting the final frame.
 +  void stop();
++  /// While running: replaces the target image if the flipping cards are
++  /// unchanged in it (e.g. only the separator blinked). The flip keeps going
++  /// instead of being cut. Returns false when the target is not compatible.
++  bool retarget(const QImage& to);
 +
 +  /// Splits image into cards by fully transparent columns (exposed for tests).
 +  static QVector<QRect> findCells(const QImage& img);
@@ -519,8 +689,776 @@ index 0000000..94bb359
 +  void tick();
 +
 +private:
++  struct Flap {
++    QRect rect;       // whole card
++    int top_h;
++    int bot_h;
++    QImage old_top;   // prepared once per flip
++    QImage new_bottom;
++  };
++  void buildBase();
++  QImage renderFast(qreal progress) const;
++
 +  QImage from_;
 +  QImage to_;
++  QImage base_;       // static part of every frame (built once per flip)
++  QVector<Flap> flaps_;
++  QVector<QRect> cells_;
++  QTimer timer_;
++  QElapsedTimer clock_;
++  int duration_;
++};
++
++} // namespace gui
++} // namespace digital_clock
++
++#endif // DIGITAL_CLOCK_GUI_FLIP_ANIMATOR_H
+diff --git a/digital_clock/main.cpp b/digital_clock/main.cpp
+index 9144f5f..e32c32c 100644
+--- a/digital_clock/main.cpp
++++ b/digital_clock/main.cpp
+@@ -34,6 +34,16 @@
+ #include "settings_storage.h"
+ #include "core/clock_settings.h"
+ #include "core/clock_application.h"
++#ifdef Q_OS_WIN
++// included last, so the windows.h macros cannot affect the project headers
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
+ 
+ int main(int argc, char* argv[])
+ {
+@@ -62,6 +72,12 @@ int main(int argc, char* argv[])
+   SingleApplication app(argc, argv, !app_config.GetValue(OPT_ONLY_ONE_INSTANCE).toBool());
+ #else
+   QApplication app(argc, argv);
++#endif
++#ifdef Q_OS_WIN
++  // keep the flip animation smooth: the clock is tiny, so a higher priority
++  // for the process and its GUI thread costs nothing but avoids hiccups
++  SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
++  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+ #endif
+   app.setWindowIcon(QIcon(":/clock/images/clock.svg.p"));
+   app.setQuitOnLastWindowClosed(false);
+diff --git a/plugins/countdown_timer/countdown_timer.pro b/plugins/countdown_timer/countdown_timer.pro
+index f02f511..85357f1 100644
+--- a/plugins/countdown_timer/countdown_timer.pro
++++ b/plugins/countdown_timer/countdown_timer.pro
+@@ -35,6 +35,8 @@ SOURCES += \
+     core/settings.cpp \
+     core/utilities.cpp \
+     gui/clickable_label.cpp \
++    gui/colorize_effect.cpp \
++    gui/flip_animator.cpp \
+     gui/settings_dialog.cpp
+ 
+ HEADERS += \
+@@ -43,6 +45,8 @@ HEADERS += \
+     core/settings.h \
+     core/utilities.h \
+     gui/clickable_label.h \
++    gui/colorize_effect.h \
++    gui/flip_animator.h \
+     gui/settings_dialog.h
+ 
+ FORMS += \
+diff --git a/plugins/countdown_timer/countdown_timer_plugin.cpp b/plugins/countdown_timer/countdown_timer_plugin.cpp
+index 3ad3e89..02774a7 100644
+--- a/plugins/countdown_timer/countdown_timer_plugin.cpp
++++ b/plugins/countdown_timer/countdown_timer_plugin.cpp
+@@ -35,6 +35,8 @@ class QHotkey {};   // just a stub to suppress compiler warnings
+ #include "core/settings.h"
+ #include "core/utilities.h"
+ #include "gui/clickable_label.h"
++#include "gui/colorize_effect.h"
++#include "gui/flip_animator.h"
+ #include "gui/settings_dialog.h"
+ 
+ namespace countdown_timer {
+@@ -121,9 +123,61 @@ QWidget* CountdownTimerPlugin::InitWidget(QGridLayout* layout)
+   return w;
+ }
+ 
++void CountdownTimerPlugin::Init(const QMap<Option, QVariant>& current_settings)
++{
++  const auto skin = current_settings.constFind(OPT_SKIN_NAME);
++  if (skin != current_settings.constEnd())
++    flip_skin_ = skin.value().toString().contains(QLatin1String("flip"), Qt::CaseInsensitive);
++  ::plugin::WidgetPluginBase::Init(current_settings);
++}
++
++void CountdownTimerPlugin::SettingsListener(Option option, const QVariant& new_value)
++{
++  // flip look follows the clock skin; colorize of the clock does not affect the countdown
++  if (option == OPT_SKIN_NAME)
++    flip_skin_ = new_value.toString().contains(QLatin1String("flip"), Qt::CaseInsensitive);
++  ::plugin::WidgetPluginBase::SettingsListener(option, new_value);
++}
++
++// card turns red when the countdown has reached zero (flip skins only)
++QImage CountdownTimerPlugin::Tinted(const QImage& raw) const
++{
++  if (!flip_skin_ || !cd_timer_ || cd_timer_->timeLeft() != 0) return raw;
++  QImage out;
++  digital_clock::gui::colorize_cards(raw, out, QColor(215, 25, 25), 1.0);
++  return out;
++}
++
+ void CountdownTimerPlugin::DisplayImage(QWidget* widget, const QImage& image)
+ {
+-  static_cast<ClickableLabel*>(widget)->setPixmap(QPixmap::fromImage(image));
++  ShowImage(widget, image, true);
++}
++
++void CountdownTimerPlugin::ShowImage(QWidget* widget, const QImage& raw, bool animate)
++{
++  using digital_clock::gui::FlipAnimator;
++  ClickableLabel* label = static_cast<ClickableLabel*>(widget);
++
++  const QImage to = Tinted(raw);
++  const QImage from = widget->property("cd_shown").value<QImage>();
++  widget->setProperty("cd_raw", raw);
++  widget->setProperty("cd_shown", to);
++
++  FlipAnimator* fa = widget->findChild<FlipAnimator*>();
++  if (!fa) {
++    fa = new FlipAnimator(widget);
++    auto show = [label](const QImage& frame) { label->setPixmap(QPixmap::fromImage(frame)); };
++    connect(fa, &FlipAnimator::frameReady, label, show);
++    connect(fa, &FlipAnimator::finished, label, show);
++  }
++
++  if (flip_skin_) {
++    // only the separator/colon changed while flipping: keep flipping
++    if (fa->isRunning() && fa->retarget(to)) return;
++    if (animate && !from.isNull() && fa->start(from, to)) return;
++  }
++  fa->stop();
++  label->setPixmap(QPixmap::fromImage(to));
+ }
+ 
+ QString CountdownTimerPlugin::GetWidgetText()
+diff --git a/plugins/countdown_timer/countdown_timer_plugin.h b/plugins/countdown_timer/countdown_timer_plugin.h
+index 3ee9e87..2cb56ae 100644
+--- a/plugins/countdown_timer/countdown_timer_plugin.h
++++ b/plugins/countdown_timer/countdown_timer_plugin.h
+@@ -19,6 +19,7 @@
+ #ifndef COUNTDOWN_TIMER_COUNTDOWN_TIMER_PLUGIN_H
+ #define COUNTDOWN_TIMER_COUNTDOWN_TIMER_PLUGIN_H
+ 
++
+ #include "widget_plugin_base.h"
+ 
+ class QHotkey;
+@@ -36,7 +37,11 @@ class CountdownTimerPlugin : public ::plugin::WidgetPluginBase
+ public:
+   CountdownTimerPlugin();
+ 
++  using ::plugin::WidgetPluginBase::Init;
++  void Init(const QMap<Option, QVariant>& current_settings) override;
++
+ public slots:
++  void SettingsListener(Option option, const QVariant& new_value) override;
+   void Start() override;
+   void Stop() override;
+ 
+@@ -57,6 +62,13 @@ private slots:
+   void onPluginOptionChanged(const QString& key, const QVariant& value);
+ 
+ private:
++  QImage Tinted(const QImage& raw) const;
++  void ShowImage(QWidget* widget, const QImage& raw, bool animate);
++
++  // flip look (used only when the clock skin name contains "flip"):
++  // the card stays black and turns red when the countdown reaches zero
++  bool flip_skin_ = false;
++
+   CountdownTimer* cd_timer_;
+   QMediaPlayer* player_;
+ 
+diff --git a/plugins/countdown_timer/gui/colorize_effect.cpp b/plugins/countdown_timer/gui/colorize_effect.cpp
+new file mode 100644
+index 0000000..9913010
+--- /dev/null
++++ b/plugins/countdown_timer/gui/colorize_effect.cpp
+@@ -0,0 +1,194 @@
++/*
++    Digital Clock - beautiful customizable clock with plugins
++    Copyright (C) 2015-2020  Nick Korotysh <nick.korotysh@gmail.com>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <QPainter>
++#include <QVector>
++#include <algorithm>
++
++#include "flip_animator.h"
++
++namespace digital_clock {
++namespace gui {
++
++// grayscales the image to dest (could be same). If rect isn't defined
++// destination image size is used to determine the dimension of grayscaling
++// process.
++static void grayscale(const QImage& image, QImage& dest, const QRect& rect = QRect())
++{
++  QRect destRect = rect;
++  QRect srcRect = rect;
++  if (rect.isNull()) {
++    srcRect = dest.rect();
++    destRect = dest.rect();
++  }
++  if (&image != &dest) {
++    destRect.moveTo(QPoint(0, 0));
++  }
++
++  const unsigned int* data = (const unsigned int*)image.bits();
++  unsigned int* outData = (unsigned int*)dest.bits();
++
++  if (dest.size() == image.size() && image.rect() == srcRect) {
++    // a bit faster loop for grayscaling everything
++    int pixels = dest.width() * dest.height();
++    for (int i = 0; i < pixels; ++i) {
++      int val = qGray(data[i]);
++      outData[i] = qRgba(val, val, val, qAlpha(data[i]));
++    }
++  } else {
++    int yd = destRect.top();
++    for (int y = srcRect.top(); y <= srcRect.bottom() && y < image.height(); y++) {
++      data = (const unsigned int*)image.scanLine(y);
++      outData = (unsigned int*)dest.scanLine(yd++);
++      int xd = destRect.left();
++      for (int x = srcRect.left(); x <= srcRect.right() && x < image.width(); x++) {
++        int val = qGray(data[x]);
++        outData[xd++] = qRgba(val, val, val, qAlpha(data[x]));
++      }
++    }
++  }
++}
++
++// code based on QGraphicsColorizeEffect code, added Retina support
++void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength)
++{
++  strength = qBound(qreal(0), strength, qreal(1));
++  bool opaque = !qFuzzyIsNull(strength);
++  bool alphaBlend = !qFuzzyIsNull(strength - 1);
++
++  if (!opaque) {
++    destImage = srcImage;
++    return;
++  }
++
++  destImage = QImage(srcImage.size(), srcImage.format());
++  destImage.setDevicePixelRatio(srcImage.devicePixelRatio());
++
++  // do colorizing
++  QPainter destPainter(&destImage);
++  grayscale(srcImage, destImage, srcImage.rect());
++  destPainter.setCompositionMode(QPainter::CompositionMode_Screen);
++  destPainter.fillRect(srcImage.rect(), color);
++  destPainter.end();
++
++  if (alphaBlend) {
++    // alpha blending srcImage and destImage
++    QImage buffer = srcImage;
++    QPainter bufPainter(&buffer);
++    bufPainter.setOpacity(strength);
++    bufPainter.drawImage(0, 0, destImage);
++    bufPainter.end();
++    destImage = buffer;
++  }
++
++  if (srcImage.hasAlphaChannel())
++    destImage.setAlphaChannel(srcImage.alphaChannel());
++}
++
++void colorize_cards(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength)
++{
++  strength = qBound(qreal(0), strength, qreal(1));
++  if (srcImage.isNull() || qFuzzyIsNull(strength)) {
++    destImage = srcImage;
++    return;
++  }
++
++  const QImage src = srcImage.convertToFormat(QImage::Format_ARGB32);
++  QImage dst = src.copy();
++  const int h = src.height();
++  const int mid = h / 2;
++  const int band = std::max(2, h * 15 / 1000);   // rows around the seam
++  const int s256 = int(strength * 256 + 0.5);
++
++  const QVector<QRect> cells = FlipAnimator::findCells(src);
++  int widest = 0;
++  for (const QRect& r : cells) widest = std::max(widest, r.width());
++
++  for (const QRect& cell : cells) {
++    if (cell.width() * 10 < widest * 6) continue;   // separators: leave as is
++
++    // per half: card body level = most frequent grey, digit level = most
++    // frequent bright grey (every 2nd pixel is enough for that)
++    int body[2] = {1, 1};
++    int digit[2] = {255, 255};
++    for (int half = 0; half < 2; ++half) {
++      const int y0 = half ? mid + band : 0;
++      const int y1 = half ? h : mid - band;
++      int hist[256] = {0};
++      for (int y = y0; y < y1; y += 2) {
++        const QRgb* line = reinterpret_cast<const QRgb*>(src.constScanLine(y));
++        for (int x = cell.left(); x <= cell.right(); x += 2) {
++          if (qAlpha(line[x]) < 250) continue;
++          ++hist[qGray(line[x])];
++        }
++      }
++      int mode = 0;
++      for (int i = 1; i < 256; ++i) if (hist[i] > hist[mode]) mode = i;
++      body[half] = std::max(1, mode);
++      int dmode = -1;
++      for (int i = std::min(255, mode + 40); i < 256; ++i)
++        if (hist[i] > 0 && (dmode < 0 || hist[i] > hist[dmode])) dmode = i;
++      digit[half] = dmode >= 0 ? dmode : 255;
++    }
++
++    // lookup tables (per half, per grey level): share of digit in the pixel
++    // and the tinted card colour (card shading is relative to the top half)
++    int lut_c[2][256];
++    int lut_r[2][256], lut_g[2][256], lut_b[2][256];
++    for (int half = 0; half < 2; ++half) {
++      const qreal span = std::max(1, digit[half] - body[half]);
++      for (int g = 0; g < 256; ++g) {
++        const qreal c = qBound(qreal(0), (g - body[half]) / span, qreal(1));
++        const qreal k = std::min(qreal(1), std::min<qreal>(g, body[half]) / body[0]);
++        lut_c[half][g] = int(c * 256 + 0.5);
++        lut_r[half][g] = int(color.red() * k + 0.5);
++        lut_g[half][g] = int(color.green() * k + 0.5);
++        lut_b[half][g] = int(color.blue() * k + 0.5);
++      }
++    }
++
++    for (int y = 0; y < h; ++y) {
++      const int half = y < mid ? 0 : 1;
++      const int d = digit[half];
++      const int* lc = lut_c[half];
++      const QRgb* in = reinterpret_cast<const QRgb*>(src.constScanLine(y));
++      QRgb* out = reinterpret_cast<QRgb*>(dst.scanLine(y));
++      for (int x = cell.left(); x <= cell.right(); ++x) {
++        const QRgb p = in[x];
++        const int a = qAlpha(p);
++        if (a == 0) continue;
++        const int g = qGray(p);
++        const int c = lc[g];
++        const int nr = (c * d + (256 - c) * lut_r[half][g]) >> 8;
++        const int ng = (c * d + (256 - c) * lut_g[half][g]) >> 8;
++        const int nb = (c * d + (256 - c) * lut_b[half][g]) >> 8;
++        const int r = qRed(p) + (((nr - qRed(p)) * s256) / 256);
++        const int gg = qGreen(p) + (((ng - qGreen(p)) * s256) / 256);
++        const int b = qBlue(p) + (((nb - qBlue(p)) * s256) / 256);
++        out[x] = qRgba(qBound(0, r, 255), qBound(0, gg, 255), qBound(0, b, 255), a);
++      }
++    }
++  }
++
++  dst.setDevicePixelRatio(srcImage.devicePixelRatio());
++  destImage = dst.convertToFormat(srcImage.format());
++  destImage.setDevicePixelRatio(srcImage.devicePixelRatio());
++}
++
++} // namespace gui
++} // namespace digital_clock
+diff --git a/plugins/countdown_timer/gui/colorize_effect.h b/plugins/countdown_timer/gui/colorize_effect.h
+new file mode 100644
+index 0000000..ea85823
+--- /dev/null
++++ b/plugins/countdown_timer/gui/colorize_effect.h
+@@ -0,0 +1,41 @@
++/*
++    Digital Clock - beautiful customizable clock with plugins
++    Copyright (C) 2015-2020  Nick Korotysh <nick.korotysh@gmail.com>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef DIGITAL_CLOCK_GUI_COLORIZE_EFFECT_H
++#define DIGITAL_CLOCK_GUI_COLORIZE_EFFECT_H
++
++#include <QImage>
++#include <QColor>
++
++namespace digital_clock {
++namespace gui {
++
++void colorize_image(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength);
++
++/*!
++ * Colorizes only the dark card body of flip-clock style skins (cards = runs of
++ * non-transparent columns, split into top/bottom halves). The bright digit and
++ * its grey lower half keep their original colors, the card keeps its relative
++ * top/bottom shading and the seam stays dark.
++ */
++void colorize_cards(const QImage& srcImage, QImage& destImage, const QColor& color, qreal strength);
++
++} // namespace gui
++} // namespace digital_clock
++
++#endif // DIGITAL_CLOCK_GUI_COLORIZE_EFFECT_H
+diff --git a/plugins/countdown_timer/gui/flip_animator.cpp b/plugins/countdown_timer/gui/flip_animator.cpp
+new file mode 100644
+index 0000000..413b8c8
+--- /dev/null
++++ b/plugins/countdown_timer/gui/flip_animator.cpp
+@@ -0,0 +1,239 @@
++/*
++    Digital Clock - beautiful customizable clock with plugins
++    Flip-card transition (added for Flipclock skins).
++    GPLv3 or later, see LICENSE.md
++ */
++
++#include "flip_animator.h"
++
++#include <QPainter>
++#include <QtMath>
++#include <algorithm>
++
++namespace digital_clock {
++namespace gui {
++
++FlipAnimator::FlipAnimator(QObject* parent) :
++  QObject(parent), duration_(420)
++{
++  timer_.setInterval(15);
++  timer_.setTimerType(Qt::PreciseTimer);
++  connect(&timer_, &QTimer::timeout, this, &FlipAnimator::tick);
++}
++
++QVector<QRect> FlipAnimator::findCells(const QImage& src)
++{
++  QVector<QRect> cells;
++  if (src.isNull()) return cells;
++  QImage img = src.format() == QImage::Format_ARGB32_Premultiplied
++      ? src : src.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++
++  const int w = img.width();
++  const int h = img.height();
++  int start = -1;
++  for (int x = 0; x <= w; ++x) {
++    bool used = false;
++    if (x < w) {
++      for (int y = 0; y < h && !used; ++y)
++        used = qAlpha(reinterpret_cast<const QRgb*>(img.constScanLine(y))[x]) != 0;
++    }
++    if (used && start < 0) start = x;
++    if (!used && start >= 0) {
++      cells.append(QRect(start, 0, x - start, h));
++      start = -1;
++    }
++  }
++  return cells;
++}
++
++static bool regionDiffers(const QImage& a, const QImage& b, const QRect& r)
++{
++  for (int y = r.top(); y <= r.bottom(); ++y) {
++    const uchar* pa = a.constScanLine(y) + r.left() * 4;
++    const uchar* pb = b.constScanLine(y) + r.left() * 4;
++    if (memcmp(pa, pb, static_cast<size_t>(r.width()) * 4) != 0) return true;
++  }
++  return false;
++}
++
++bool FlipAnimator::start(const QImage& from, const QImage& to)
++{
++  stop();
++  if (from.isNull() || to.isNull() || from.size() != to.size()) return false;
++
++  from_ = from.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++  to_ = to.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++
++  QVector<QRect> cells = findCells(to_);
++  if (cells.isEmpty()) return false;
++
++  int widest = 0;
++  for (const QRect& r : qAsConst(cells)) widest = std::max(widest, r.width());
++
++  cells_.clear();
++  for (const QRect& r : qAsConst(cells)) {
++    if (r.width() * 10 < widest * 6) continue;   // separators: no flip
++    if (regionDiffers(from_, to_, r)) cells_.append(r);
++  }
++  if (cells_.isEmpty()) return false;
++
++  // everything that does not change between frames is prepared right here
++  flaps_.clear();
++  for (const QRect& r : qAsConst(cells_)) {
++    Flap f;
++    f.rect = r;
++    f.top_h = r.height() / 2;
++    f.bot_h = r.height() - f.top_h;
++    f.old_top = from_.copy(QRect(r.left(), r.top(), r.width(), f.top_h));
++    f.new_bottom = to_.copy(QRect(r.left(), r.top() + f.top_h, r.width(), f.bot_h));
++    flaps_.append(f);
++  }
++  buildBase();
++
++  clock_.start();
++  timer_.start();
++  return true;
++}
++
++void FlipAnimator::buildBase()
++{
++  base_ = to_.copy();
++  QPainter p(&base_);
++  for (const Flap& f : qAsConst(flaps_)) {
++    const QRect top(f.rect.left(), f.rect.top(), f.rect.width(), f.top_h);
++    const QRect bot(f.rect.left(), f.rect.top() + f.top_h, f.rect.width(), f.bot_h);
++    p.setCompositionMode(QPainter::CompositionMode_Source);
++    p.fillRect(f.rect, Qt::transparent);
++    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++    p.drawImage(top.topLeft(), to_, top);     // new top half
++    p.drawImage(bot.topLeft(), from_, bot);   // old bottom half
++  }
++  p.end();
++}
++
++bool FlipAnimator::retarget(const QImage& to)
++{
++  if (!timer_.isActive() || to.isNull() || to.size() != to_.size()) return false;
++  const QImage nt = to.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++  for (const Flap& f : qAsConst(flaps_))
++    if (regionDiffers(to_, nt, f.rect)) return false;
++  to_ = nt;
++  buildBase();
++  return true;
++}
++
++void FlipAnimator::stop()
++{
++  timer_.stop();
++  cells_.clear();
++  flaps_.clear();
++  base_ = QImage();
++}
++
++void FlipAnimator::tick()
++{
++  qreal p = qreal(clock_.elapsed()) / duration_;
++  if (p >= 1.0) {
++    timer_.stop();
++    cells_.clear();
++    flaps_.clear();
++    base_ = QImage();
++    emit finished(to_);
++    return;
++  }
++  emit frameReady(renderFast(p));
++}
++
++static void drawFlap(QPainter& painter, const QImage& src, const QRect& srcRect,
++                     const QRectF& target, qreal shade, bool shade_from_bottom)
++{
++  QImage flap = src.copy(srcRect);
++  if (shade > 0.0) {
++    QPainter fp(&flap);
++    fp.setCompositionMode(QPainter::CompositionMode_SourceAtop);
++    QLinearGradient g(0, 0, 0, flap.height());
++    QColor dark(0, 0, 0, qBound(0, int(shade * 255), 255));
++    QColor none(0, 0, 0, 0);
++    // darker towards the hinge (middle line)
++    g.setColorAt(shade_from_bottom ? 0.0 : 1.0, none);
++    g.setColorAt(shade_from_bottom ? 1.0 : 0.0, dark);
++    fp.fillRect(flap.rect(), g);
++  }
++  painter.drawImage(target, flap);
++}
++
++QImage FlipAnimator::renderFast(qreal progress) const
++{
++  QImage out = base_.copy();
++  QPainter p(&out);
++  p.setRenderHint(QPainter::SmoothPixmapTransform, true);
++
++  const qreal e = progress < 0.5 ? 2 * progress * progress
++                                 : 1 - qPow(-2 * progress + 2, 2) / 2;
++  const qreal c = qCos(M_PI * e);
++
++  for (const Flap& f : qAsConst(flaps_)) {
++    const qreal hinge = f.rect.top() + f.top_h;
++    if (c >= 0) {
++      const qreal hh = f.top_h * c;
++      drawFlap(p, f.old_top, f.old_top.rect(),
++               QRectF(f.rect.left(), hinge - hh, f.rect.width(), hh),
++               0.55 * (1 - c), true);
++    } else {
++      const qreal hh = f.bot_h * (-c);
++      drawFlap(p, f.new_bottom, f.new_bottom.rect(),
++               QRectF(f.rect.left(), hinge, f.rect.width(), hh),
++               0.55 * (1 + c), false);
++    }
++  }
++  p.end();
++  out.setDevicePixelRatio(to_.devicePixelRatio());
++  return out;
++}
++
++QImage FlipAnimator::renderFrame(const QImage& from, const QImage& to,
++                                 const QVector<QRect>& cells, qreal progress)
++{
++  QImage out = to.copy();
++  QPainter p(&out);
++  p.setRenderHint(QPainter::SmoothPixmapTransform, true);
++
++  // ease-in/out so the card accelerates, then settles
++  const qreal e = progress < 0.5 ? 2 * progress * progress
++                                 : 1 - qPow(-2 * progress + 2, 2) / 2;
++  const qreal theta = M_PI * e;          // 0 .. pi
++  const qreal c = qCos(theta);           // 1 .. -1
++
++  for (const QRect& r : cells) {
++    const int top_h = r.height() / 2;
++    const int bot_h = r.height() - top_h;
++    const QRect top(r.left(), r.top(), r.width(), top_h);
++    const QRect bot(r.left(), r.top() + top_h, r.width(), bot_h);
++
++    // static halves: new top above, old bottom below
++    p.setCompositionMode(QPainter::CompositionMode_Source);
++    p.fillRect(r, Qt::transparent);
++    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++    p.drawImage(top.topLeft(), to, top);
++    p.drawImage(bot.topLeft(), from, bot);
++
++    const qreal hinge = r.top() + top_h;
++    if (c >= 0) {
++      // old top half folding down towards the hinge
++      const qreal hh = top_h * c;
++      drawFlap(p, from, top, QRectF(r.left(), hinge - hh, r.width(), hh),
++               0.55 * (1 - c), true);
++    } else {
++      // new bottom half unfolding downwards from the hinge
++      const qreal hh = bot_h * (-c);
++      drawFlap(p, to, bot, QRectF(r.left(), hinge, r.width(), hh),
++               0.55 * (1 + c), false);
++    }
++  }
++  p.end();
++  out.setDevicePixelRatio(to.devicePixelRatio());
++  return out;
++}
++
++} // namespace gui
++} // namespace digital_clock
+diff --git a/plugins/countdown_timer/gui/flip_animator.h b/plugins/countdown_timer/gui/flip_animator.h
+new file mode 100644
+index 0000000..ecf943a
+--- /dev/null
++++ b/plugins/countdown_timer/gui/flip_animator.h
+@@ -0,0 +1,88 @@
++/*
++    Digital Clock - beautiful customizable clock with plugins
++    Flip-card transition (added for Flipclock skins).
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++ */
++
++#ifndef DIGITAL_CLOCK_GUI_FLIP_ANIMATOR_H
++#define DIGITAL_CLOCK_GUI_FLIP_ANIMATOR_H
++
++#include <QObject>
++#include <QElapsedTimer>
++#include <QImage>
++#include <QRect>
++#include <QTimer>
++#include <QVector>
++
++namespace digital_clock {
++namespace gui {
++
++/*!
++ * Turns "image A -> image B" into a sequence of frames where every card
++ * (a horizontal run of non-transparent columns) whose pixels changed is
++ * flipped like a mechanical flip clock: the old top half folds down and
++ * the new bottom half folds out underneath it.
++ * Narrow cells (separators) are not flipped, they just switch.
++ */
++class FlipAnimator : public QObject
++{
++  Q_OBJECT
++
++public:
++  explicit FlipAnimator(QObject* parent = nullptr);
++
++  bool isRunning() const { return timer_.isActive(); }
++  void setDuration(int msec) { duration_ = msec; }
++
++  /// Starts flipping from 'from' to 'to'. Returns false (and emits nothing)
++  /// when the images are not compatible, caller should just show 'to'.
++  bool start(const QImage& from, const QImage& to);
++  /// Stops animation without emitting the final frame.
++  void stop();
++  /// While running: replaces the target image if the flipping cards are
++  /// unchanged in it (e.g. only the separator blinked). The flip keeps going
++  /// instead of being cut. Returns false when the target is not compatible.
++  bool retarget(const QImage& to);
++
++  /// Splits image into cards by fully transparent columns (exposed for tests).
++  static QVector<QRect> findCells(const QImage& img);
++  /// Renders one frame, progress in [0, 1] (exposed for tests).
++  static QImage renderFrame(const QImage& from, const QImage& to,
++                            const QVector<QRect>& cells, qreal progress);
++
++signals:
++  void frameReady(const QImage& frame);
++  void finished(const QImage& final_image);
++
++private slots:
++  void tick();
++
++private:
++  struct Flap {
++    QRect rect;       // whole card
++    int top_h;
++    int bot_h;
++    QImage old_top;   // prepared once per flip
++    QImage new_bottom;
++  };
++  void buildBase();
++  QImage renderFast(qreal progress) const;
++
++  QImage from_;
++  QImage to_;
++  QImage base_;       // static part of every frame (built once per flip)
++  QVector<Flap> flaps_;
 +  QVector<QRect> cells_;
 +  QTimer timer_;
 +  QElapsedTimer clock_;
